@@ -169,23 +169,32 @@ run_set_loglevel() {
         return 1
     fi
 
-    if ! grep -q 'loglevel=' "$CONF"; then
-        print_info "No loglevel parameter found — nothing to do."
-        return 0
-    fi
-
+    # Create backup before any modifications
     if [[ ! -f "${CONF}.bak" ]]; then
         print_info "Creating original backup at ${CONF}.bak ..."
         cp "$CONF" "${CONF}.bak"
     else
-        print_info "Backup already exists at ${CONF}.bak — preserving original."
+        print_info "Backup already exists — preserving original."
     fi
 
-    sed -i 's/loglevel=[0-9]*/loglevel=0/g' "$CONF"
+    # 1. If loglevel= exists anywhere in the file, update it to 0
+    if grep -q 'loglevel=' "$CONF"; then
+        print_info "loglevel= found. Updating value to 0..."
+        sed -i 's/loglevel=[0-9]*/loglevel=0/g' "$CONF"
+
+    # 2. If loglevel= is missing, append it inside the KERNEL_CMDLINE[default] quotes
+    else
+        print_info "loglevel= not found. Adding to KERNEL_CMDLINE[default]..."
+        # This matches the KERNEL_CMDLINE[default]+="... line and inserts loglevel=0 before the closing quote
+        sed -i '/^KERNEL_CMDLINE\[default\]/ s/\"$/ loglevel=0\"/' "$CONF"
+    fi
+
+    # Regenerate Limine config
     if [[ "$SKIP_LIMINE_UPDATE" -eq 0 ]]; then
         print_info "Regenerating /boot/limine.conf..."
         limine-update
     fi
+
     print_success "loglevel set to 0. Reboot to apply."
 }
 
@@ -317,6 +326,49 @@ EOF
             return 0
             ;;
     esac
+}
+
+run_switch_to_default_kernel() {
+    print_step "12" "Migrating to Default CachyOS Kernel"
+
+    # 1. Check if we are already on the standard kernel
+    if pacman -Qq linux-cachyos &>/dev/null; then
+        print_info "Standard CachyOS kernel is already installed."
+
+        # If deckify is also there, we should still clean it up
+        if pacman -Qq linux-cachyos-deckify &>/dev/null; then
+            print_info "Deckify kernel found alongside standard. Proceeding to cleanup..."
+        else
+            print_success "System is already running the default kernel. Nothing to do."
+            return 0
+        fi
+    fi
+
+    # 2. Check if Deckify is actually here to be replaced
+    if ! pacman -Qq linux-cachyos-deckify &>/dev/null; then
+        print_error "linux-cachyos-deckify not found. Migration is not applicable."
+        return 1
+    fi
+
+    # 3. Install the default kernel
+    print_info "Installing linux-cachyos and headers..."
+    if ! sudo pacman -S --noconfirm linux-cachyos linux-cachyos-headers; then
+        print_error "Failed to install the default CachyOS kernel."
+        return 1
+    fi
+
+    # 4. Remove the deckify kernel
+    print_info "Removing linux-cachyos-deckify..."
+    sudo pacman -Rs --noconfirm linux-cachyos-deckify linux-cachyos-deckify-headers 2>/dev/null
+
+    # 5. Update Limine
+    if [[ "$SKIP_LIMINE_UPDATE" -eq 0 ]]; then
+        print_info "Regenerating Limine boot menu..."
+        sudo limine-update
+    fi
+
+    print_success "System successfully migrated to default kernel."
+    print_info "Please reboot to apply changes."
 }
 # ==============================================================================
 # OVERCLOCK MENU (embedded from 07-overclock_menu.sh)
@@ -1070,28 +1122,40 @@ run_status() {
     echo -e "  ${BOLD}${YELLOW}Memory & Swap${RESET}"
     echo -e "  ${DIM}──────────────────────────────────────────────────────────────${RESET}"
 
+    # ZSWAP Detection
     local zswap_enabled zswap_compressor zswap_pool
-    zswap_enabled=$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo "N/A")
+    zswap_enabled=$(cat /sys/module/zswap/parameters/enabled 2>/dev/null || echo "N")
     zswap_compressor=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null || echo "N/A")
     zswap_pool=$(cat /sys/module/zswap/parameters/max_pool_percent 2>/dev/null || echo "N/A")
     local zswap_color
     [[ "$zswap_enabled" == "Y" ]] && zswap_color="$GREEN" || zswap_color="$RED"
-    echo -e "  ${CYAN}ZSWAP${RESET}             ${zswap_color}${zswap_enabled}${RESET}  compressor=${zswap_compressor}  pool=${zswap_pool}%"
+    echo -e "  ${CYAN}ZSWAP${RESET}              ${zswap_color}${zswap_enabled}${RESET}  compressor=${zswap_compressor}  pool=${zswap_pool}%"
 
-    local zram_state
-    zram_state=$(systemctl is-active systemd-zram-setup@zram0.service 2>/dev/null || echo "inactive")
+    # ZRAM Detection (Checks kernel device instead of just one specific service)
+    local zram_state="inactive"
+    if [[ -d /sys/block/zram0 ]]; then
+        zram_state="active"
+    fi
     local zram_color
     [[ "$zram_state" == "active" ]] && zram_color="$GREEN" || zram_color="$DIM"
-    echo -e "  ${CYAN}ZRAM${RESET}              ${zram_color}${zram_state}${RESET}"
+    echo -e "  ${CYAN}ZRAM${RESET}               ${zram_color}${zram_state}${RESET}"
 
+    # Swappiness
     local swappiness
     swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo "N/A")
-    echo -e "  ${CYAN}Swappiness${RESET}        ${swappiness}"
+    echo -e "  ${CYAN}Swappiness${RESET}         ${swappiness}"
 
+    # Swap Devices (Filtered to avoid empty/inactive lines)
     echo -e "  ${CYAN}Swap Devices${RESET}"
-    swapon --show --noheadings 2>/dev/null | while read -r name type size used prio; do
-        echo -e "    ${DIM}${name}  ${type}  size=${size}  used=${used}  prio=${prio}${RESET}"
-    done
+    local swap_output
+    swap_output=$(swapon --show --noheadings 2>/dev/null)
+    if [[ -z "$swap_output" ]]; then
+        echo -e "    ${DIM}(No active swap devices found)${RESET}"
+    else
+        echo "$swap_output" | while read -r name type size used prio; do
+            echo -e "    ${DIM}${name}  ${type}  size=${size}  used=${used}  prio=${prio}${RESET}"
+        done
+    fi
     echo ""
 
     # --- Kernel Parameters ---
@@ -1236,6 +1300,7 @@ show_menu() {
     print_item  "9"  "Revert Mitigations"  "Re-enable CPU security mitigations"
     print_item  "10" "Revert loglevel"     "Restore loglevel to default (3)"
     print_item  "11" "Toggle Boot Mode"    "Switch between Game Mode & Desktop"
+    print_item "12" "CachyOS Kernel"       "Replaces Deckify kernel with standard CachyOS"
     echo ""
     print_item  "S"  "Status"              "Summary of current system settings"
     echo ""
@@ -1260,6 +1325,7 @@ while true; do
         9) run_revert_mitigations;        press_enter ;;
         10) run_revert_loglevel;          press_enter ;;
         11) run_toggle_boot_mode;         press_enter ;;
+        12) run_switch_to_default_kernel  press_enter ;;
         S) run_status;                    press_enter ;;
         A) run_all;                       press_enter ;;
         0)
