@@ -1252,11 +1252,30 @@ run_all() {
     local failed=0
     SKIP_LIMINE_UPDATE=1
 
-    for task in run_cpu_governor run_gpu_governor run_enable_swap run_set_loglevel run_disable_zram_enable_zswap run_disable_mitigations; do
+    # Define the list of tasks to run
+    local tasks=(
+        run_cpu_governor
+        run_gpu_governor
+        run_enable_swap
+        run_set_loglevel
+        run_disable_zram_enable_zswap
+        run_disable_mitigations
+    )
+
+    for task in "${tasks[@]}"; do
+        # --- NEW: PACMAN LOCK GUARD ---
+        # Checks if pacman is busy BEFORE starting the next task
+        while [ -f /var/lib/pacman/db.lck ]; do
+            print_info "Waiting for system locks to release before: ${task//_/ }..."
+            sleep 2
+        done
+
         echo ""
         echo -e "  ${BG_HEADER}${BOLD}${WHITE}  Running: ${task//_/ }  ${RESET}"
+
         if $task; then
-            :
+            # Optional: Short sleep to let system services settle after a success
+            sleep 1
         else
             print_error "Task failed: $task — continuing with remaining tasks."
             (( failed++ )) || true
@@ -1264,9 +1283,13 @@ run_all() {
         echo ""
     done
 
+    # Re-enable and run the bootloader update once at the end
     SKIP_LIMINE_UPDATE=0
     print_info "Regenerating /boot/limine.conf..."
-    limine-update
+    if ! limine-update; then
+        print_error "Failed to update Limine. Please run manually."
+        (( failed++ ))
+    fi
 
     echo -e "  ${BOLD}${CYAN}══════════════════════════════════════════════════════════════${RESET}"
     if [[ "$failed" -eq 0 ]]; then
@@ -1275,7 +1298,6 @@ run_all() {
         print_error "$failed task(s) encountered errors. Review output above."
     fi
 }
-
 # ==============================================================================
 # MAIN MENU LOOP
 # ==============================================================================
