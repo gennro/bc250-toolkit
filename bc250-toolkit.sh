@@ -610,7 +610,7 @@ install_gpu() {
     fi
 }
 
-# Read the active profile label from installed config files (best-effort)
+# Read the active profile and match against presets
 oc_active_profile() {
     local cpu_freq="" gpu_freq="" cpu_temp="" label=""
 
@@ -619,7 +619,6 @@ oc_active_profile() {
         cpu_temp=$(awk -F'= ' '/^max_temperature/{print $2}' "$CPU_DEST" 2>/dev/null | tr -d ' ')
     fi
     if [[ -f "$GPU_DEST" ]]; then
-        # Last safe-point frequency is the max GPU clock
         gpu_freq=$(awk -F'= ' '/^frequency/{print $2}' "$GPU_DEST" 2>/dev/null | tr -d ' ' | tail -1)
     fi
 
@@ -630,6 +629,27 @@ oc_active_profile() {
     else
         echo "Unknown (configs not found)"
     fi
+}
+
+# Match current config against preset table — returns preset name or "Custom"
+oc_match_preset() {
+    local cpu_freq gpu_freq
+    [[ ! -f "$CPU_DEST" || ! -f "$GPU_DEST" ]] && echo "Unknown" && return
+
+    cpu_freq=$(awk -F'= ' '/^frequency/{print $2}' "$CPU_DEST" 2>/dev/null | tr -d ' ')
+    gpu_freq=$(awk -F'= ' '/^frequency/{print $2}' "$GPU_DEST" 2>/dev/null | tr -d ' ' | tail -1)
+
+    # Preset CPU MHz values matching PRESET_CPU_WRITERS order
+    local preset_cpu_freqs=(4000 3850 3500 3500 3500)
+    local preset_gpu_freqs=(2350 2100 2100 2000 1500)
+
+    for i in "${!PRESET_NAMES[@]}"; do
+        if [[ "$cpu_freq" == "${preset_cpu_freqs[$i]}" && "$gpu_freq" == "${preset_gpu_freqs[$i]}" ]]; then
+            echo "${PRESET_NAMES[$i]}"
+            return
+        fi
+    done
+    echo "Custom"
 }
 
 PRESET_NAMES=("High" "Medium-High" "Medium-Low" "Low" "Stock - Failsafe")
@@ -782,7 +802,7 @@ run_overclock_menu() {
     while true; do
         print_banner
         print_section "Performance Profile Menu"
-        echo -e "  ${DIM}Active: $(oc_active_profile)${RESET}"
+        echo -e "  ${DIM}Active: $(oc_match_preset) — $(oc_active_profile)${RESET}"
         echo ""
         for i in "${!PRESET_NAMES[@]}"; do
             print_item "$((i+1))" "${PRESET_NAMES[$i]}" "${PRESET_DESCS[$i]}"
@@ -958,10 +978,12 @@ run_status() {
     echo -e "  ${BOLD}${YELLOW}Overclock${RESET}"
     echo -e "  ${DIM}──────────────────────────────────────────────────────────────${RESET}"
     if [[ -f "$CPU_CONF" ]]; then
-        local cpu_freq cpu_scale cpu_temp
+        local cpu_freq cpu_scale cpu_temp cpu_preset
         cpu_freq=$(awk -F'= ' '/^frequency/{print $2}' "$CPU_CONF" | tr -d ' ')
         cpu_scale=$(awk -F'= ' '/^scale/{print $2}' "$CPU_CONF" | tr -d ' ')
         cpu_temp=$(awk -F'= ' '/^max_temperature/{print $2}' "$CPU_CONF" | tr -d ' ')
+        cpu_preset=$(oc_match_preset)
+        echo -e "  ${CYAN}Preset${RESET}            ${BOLD}${WHITE}${cpu_preset}${RESET}"
         echo -e "  ${CYAN}CPU Profile${RESET}       ${cpu_freq}MHz  scale ${cpu_scale}  max ${cpu_temp}°C"
     else
         echo -e "  ${CYAN}CPU Profile${RESET}       ${DIM}config not found${RESET}"
@@ -1045,6 +1067,36 @@ run_status() {
     echo ""
 
     echo -e "  ${BOLD}${CYAN}══════════════════════════════════════════════════════════════${RESET}"
+}
+
+run_revert_loglevel() {
+    local CONF="/etc/default/limine"
+    print_step "10" "Revert loglevel — Restoring default"
+
+    if [[ ! -f "$CONF" ]]; then
+        print_error "File not found: $CONF"
+        return 1
+    fi
+
+    if ! grep -q 'loglevel=' "$CONF"; then
+        print_info "No loglevel parameter found — nothing to revert."
+        return 0
+    fi
+
+    if grep -q 'loglevel=3' "$CONF"; then
+        print_info "loglevel is already at default (3) — nothing to do."
+        return 0
+    fi
+
+    if ! confirm "This will restore loglevel to 3 in $CONF. Proceed?"; then
+        print_info "Cancelled."
+        return 0
+    fi
+
+    sed -i 's/loglevel=[0-9]*/loglevel=3/g' "$CONF"
+    print_info "Regenerating /boot/limine.conf..."
+    limine-update
+    print_success "loglevel restored to 3. Reboot to apply."
 }
 
 run_revert_mitigations() {
@@ -1132,6 +1184,7 @@ show_menu() {
     print_section "Extras"
     print_item  "8"  "Revert ZSWAP"        "Remove zswap, re-enable ZRAM"
     print_item  "9"  "Revert Mitigations"  "Re-enable CPU security mitigations"
+    print_item  "10" "Revert loglevel"     "Restore loglevel to default (3)"
     echo ""
     print_item  "S"  "Status"              "Summary of current system settings"
     echo ""
@@ -1154,6 +1207,7 @@ while true; do
         7) run_disable_mitigations;       press_enter ;;
         8) run_revert_zswap;              press_enter ;;
         9) run_revert_mitigations;        press_enter ;;
+        10) run_revert_loglevel;          press_enter ;;
         S) run_status;                    press_enter ;;
         A) run_all;                       press_enter ;;
         0)
