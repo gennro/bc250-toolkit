@@ -275,9 +275,13 @@ run_toggle_boot_mode() {
     fi
 
     # --- 2. DETECTION ---
-    local current_mode="${BOLD}${CYAN}Desktop Mode${RESET}"
-    if [[ -f "$OVERRIDE_FILE" ]] && grep -q "gamescope" "$OVERRIDE_FILE"; then
-        current_mode="${BOLD}${GREEN}Game Mode${RESET}"
+    # Default to Game Mode — correct for this hardware out of the box.
+    # Only report Desktop Mode if plasma.desktop is positively found in the active config.
+    local current_mode="${BOLD}${GREEN}Game Mode${RESET}"
+    if [[ -f "$OVERRIDE_FILE" ]]; then
+        grep -q "plasma.desktop" "$OVERRIDE_FILE" && current_mode="${BOLD}${CYAN}Desktop Mode${RESET}"
+    else
+        grep -rq "plasma.desktop" "$CONF_DIR"/*.conf 2>/dev/null && current_mode="${BOLD}${CYAN}Desktop Mode${RESET}"
     fi
 
     print_info "Current Boot Mode: $current_mode"
