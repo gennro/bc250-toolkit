@@ -10,9 +10,9 @@ It does the following:
 2. Install GPU governor: https://github.com/filippor/cyan-skillfish-governor
 3. Enable swap
 4. Hide the RDSEED error displayed on boot.
-5. Disable ZRAM
+5. Enable ZSWAP
 6. Easily change CPU and GPU overclock settings on the fly
-7. Fix DP audio by outputting a patch file that can be used with CachyOS Kernel Manager to build a custom kernel with the patch applied.
+7. Displays a status window showing you your current settings.
 
 Installation:
 1. Download and place bc260-toolkit.sh in the home directory.
