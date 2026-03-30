@@ -1405,7 +1405,7 @@ while true; do
         9) run_revert_mitigations;        press_enter ;;
         10) run_revert_loglevel;          press_enter ;;
         11) run_toggle_boot_mode;         press_enter ;;
-        12) run_switch_to_default_kernel  press_enter ;;
+        12) run_switch_to_default_kernel;  press_enter ;;
         13) run_install_acpi_fix;         press_enter ;;
         S) run_status;                    press_enter ;;
         A) run_all;                       press_enter ;;
