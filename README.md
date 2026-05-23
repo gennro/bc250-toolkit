@@ -20,3 +20,9 @@ In desktop mode run the below in the terminal(Konsole):
 <pre>
 curl -sSLO https://raw.githubusercontent.com/redbeard1083/bc250-toolkit/main/bc250-toolkit.sh && chmod +x bc250-toolkit.sh && ./bc250-toolkit.sh
 </pre>
+
+
+In desktop mode run the below in the terminal(Konsole) for the CU unlock script or you can download above bc250-unlock.sh:
+<pre>
+curl -fsSL https://raw.githubusercontent.com/gennro/bc250-toolkit/main/bc250-unlock.sh -o bc250-unlock.sh && chmod +x bc250-unlock.sh && sudo ./bc250-unlock.sh
+</pre>
