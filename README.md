@@ -25,7 +25,7 @@ curl -sSLO https://raw.githubusercontent.com/redbeard1083/bc250-toolkit/main/bc2
 
 
 
-## The BC250-unlock script will let you unlock up to 40CUs, 
+## The BC250-unlock script will let you unlock up to 40CUs.
 
 > Mind you you can run into stability issues if there are some CUs that are actually bad. 
 
