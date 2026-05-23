@@ -16,17 +16,13 @@
 #  ╚═════╝ ╚═╝╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝
 #
 # ==============================================================================
-# ==============================================================================
-#  !! DISCLAIMER — READ CAREFULLY BEFORE PROCEEDING !!
-#  USE AT YOUR OWN RISK. Always ensure you have backups and a recovery plan.
-# ==============================================================================
 
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
 # CONSTANTS & PATHS
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.3.0"
 SCRIPT_NAME="bc250-unlock"
 BASE_DIR="/var/lib/bc250-unlock"
 BACKUP_DIR="${BASE_DIR}/backups"
@@ -80,7 +76,8 @@ check_root() {
 init_dirs() {
     mkdir -p "${BASE_DIR}" "${BACKUP_DIR}" "${ORIGINAL_BACKUP_DIR}" \
              "${CURRENT_BACKUP_DIR}" "${PATCH_DIR}"
-    touch "${LOG_FILE}"
+    # SAFETY: Truncate instead of append to prevent log bloating across consecutive menu loads
+    : > "${LOG_FILE}"
     log "INFO" "Initialized workspaces. Script version: ${SCRIPT_VERSION}"
 }
 
@@ -92,7 +89,7 @@ show_disclaimer() {
 ║                    !! SYSTEM REQUIREMENTS & WARNING DISCLAIMER !!            ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  REQUIRED SYSTEM ENVIRONMENT:                                                ║
-║  - HARDWARE   : AMD BC-250                                                   ║
+║  - HARDWARE   : AMD BC-250 (Sony Ariel / PlayStation 5 Mining Rig Hardware)  ║
 ║  - OS         : CachyOS Linux (Rolling Distribution)                         ║
 ║  - BOOTLOADER : Limine Bootloader                                            ║
 ║                                                                              ║
@@ -103,7 +100,7 @@ show_disclaimer() {
 ║  silicon defects, instability, or thermal vulnerabilities.                   ║
 ║                                                                              ║
 ║  POTENTIAL RISKS INCLUDE:                                                    ║
-║  - Hard system locks, kernel panics, or failure to drop into display managers║
+║  - Hard system locks, kernel panics, or failure to drop into display managers ║
 ║  - Visual artifacting, compute degradation, or driver crashes under load     ║
 ║  - Permanent hardware degradation or thermal damage if run without adequate  ║
 ║    cooling configurations on unstable silicon.                               ║
@@ -126,7 +123,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# FLAVOR-AWARE KERNEL DETECTION
+# KERNEL DETECTION
 # ------------------------------------------------------------------------------
 detect_kernel() {
     KERNEL_VERSION=$(uname -r)
@@ -135,8 +132,7 @@ detect_kernel() {
     KERNEL_PKG=""
     KERNEL_HEADERS_PKG=""
 
-    # Attempt to locate matching installed package database rules
-    for pkg in $(pacman -Qq 2>/dev/null | grep -E '^linux-cachyos' | grep -v headers | grep -v docs); do
+    for pkg in $(pacman -Qq 2>/dev/null | grep -E '^linux-cachyos' | grep -v headers | grep -v docs || true); do
         pkg_ver=$(pacman -Q "$pkg" 2>/dev/null | awk '{print $2}' || true)
         if [[ -z "$pkg_ver" ]]; then continue; fi
 
@@ -150,21 +146,14 @@ detect_kernel() {
         fi
     done
 
-    # Fallback compilation parser logic based directly on uname properties
     if [[ -z "$KERNEL_PKG" ]]; then
         warn "Could not auto-match package directly. Deriving target definitions..."
-        if echo "$KERNEL_VERSION" | grep -q "cachyos-"; then
-            local suffix="${KERNEL_VERSION#* -cachyos}"
-            if [[ "$KERNEL_VERSION" == *"cachyos"* ]]; then
-                # Pull everything from 'linux-cachyos' onwards to keep modifiers intact (e.g. deckify)
-                local flavor_suffix=$(echo "$KERNEL_VERSION" | grep -oP 'cachyos.*')
-                KERNEL_PKG="linux-${flavor_suffix}"
-            else
-                KERNEL_PKG="linux-cachyos"
-            fi
+        if [[ "$KERNEL_VERSION" == *"cachyos"* ]]; then
+            local flavor_suffix
+            flavor_suffix=$(echo "$KERNEL_VERSION" | grep -oP 'cachyos[a-zA-Z0-9_-]*' | head -n1 || echo "cachyos")
+            KERNEL_PKG="linux-${flavor_suffix}"
         else
-            error "Could not safely match a running CachyOS layout from: ${KERNEL_VERSION}"
-            exit 1
+            KERNEL_PKG="linux-cachyos"
         fi
         KERNEL_HEADERS_PKG="${KERNEL_PKG}-headers"
     fi
@@ -205,6 +194,12 @@ backup_module() {
     local mode="$1"
     local dest_dir=$([[ "$mode" == "original" ]] && echo "${ORIGINAL_BACKUP_DIR}" || echo "${CURRENT_BACKUP_DIR}")
 
+    # SAFETY: Never allow subsequent install attempts to overwrite the pure factory backup
+    if [[ "$mode" == "original" && ( -f "${ORIGINAL_BACKUP_DIR}/amdgpu.ko.zst" || -f "${ORIGINAL_BACKUP_DIR}/amdgpu.ko" ) ]]; then
+        log "INFO" "Original factory backup already indexed safely. Skipping overwrite barrier."
+        return 0
+    fi
+
     step "Backing up module instances (${mode})..."
     local path; path=$(find "/lib/modules/${KERNEL_VERSION}" -name "amdgpu.ko*" 2>/dev/null | head -n1)
 
@@ -218,7 +213,7 @@ backup_module() {
 
 install_dependencies() {
     header "Synchronizing Core Toolchains"
-    local pkgs=("dkms" "base-devel" "pahole" "bc" "git" "wget" "python" "libdrm" "${KERNEL_HEADERS_PKG}")
+    local pkgs=("dkms" "base-devel" "pahole" "bc" "git" "wget" "python" "libdrm" "clang" "llvm" "lld" "${KERNEL_HEADERS_PKG}")
 
     step "Refreshing standard pacman repositories..."
     pacman -Sy --noconfirm >>"${LOG_FILE}" 2>&1
@@ -244,7 +239,7 @@ download_patch() {
 }
 
 # ------------------------------------------------------------------------------
-# STABILIZATION MASK MANAGER (0-4 WGP CORRECTION INTERFACES)
+# STABILIZATION MASK MANAGER
 # ------------------------------------------------------------------------------
 manage_disabled_cu() {
     header "Mask Unstable CU Pairs"
@@ -334,7 +329,7 @@ manage_disabled_cu() {
 }
 
 # ------------------------------------------------------------------------------
-# FLAVOR-AWARE CORE COMPILATION
+# DRIVER MODULE COMPILATION
 # ------------------------------------------------------------------------------
 build_and_install() {
     header "Building Patched amdgpu Module"
@@ -342,21 +337,20 @@ build_and_install() {
     local kernel_build="/lib/modules/${KERNEL_VERSION}/build"
     local build_work="${BASE_DIR}/build"
 
+    # SAFETY: Wipe previous partial build roots every execution to guarantee structural clean slates
     rm -rf "${build_work}"; mkdir -p "${build_work}"
 
     step "Downloading matching kernel architecture packages..."
-    # 1. Isolate clean semantic versions (e.g. 6.13.2)
-    local clean_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
-
-    # 2. Extract complete modifier strings following the semantic tags (e.g. cachyos-deckify)
+    local full_ver
+    full_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' || echo "${KERNEL_VERSION%%-cachyos*}")
     local flavor_suffix=$(echo "${KERNEL_VERSION}" | grep -oP 'cachyos.*' || echo "cachyos")
 
-    local tar_url="https://github.com/CachyOS/linux/releases/download/${flavor_suffix}-${clean_ver}/${flavor_suffix}-${clean_ver}.tar.gz"
+    local tar_url="https://github.com/CachyOS/linux/releases/download/${flavor_suffix}-${full_ver}/${flavor_suffix}-${full_ver}.tar.gz"
     log "Fetching primary package release path: ${tar_url}"
 
     if ! curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz"; then
-        # Secondary fallback layout to alternate tag groups if upstream tracking changes
-        tar_url="https://github.com/CachyOS/linux/releases/download/cachyos-${clean_ver}/linux-${clean_ver}.tar.gz"
+        local clean_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
+        tar_url="https://github.com/CachyOS/linux/releases/download/${flavor_suffix}-${clean_ver}/${flavor_suffix}-${clean_ver}.tar.gz"
         log "Routing to alternate branch indices: ${tar_url}"
         curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz" || {
             error "Could not successfully locate valid upstream reference packs."; exit 1
@@ -367,16 +361,19 @@ build_and_install() {
     tar -xf "${BASE_DIR}/kernel_src.tar.gz" --wildcards --ignore-case -C "${build_work}" "*/drivers/gpu/drm/amd/*" 2>>"${LOG_FILE}" || true
     rm -f "${BASE_DIR}/kernel_src.tar.gz"
 
-    local true_amd_dir; true_amd_dir=$(find "${build_work}" -type d -path "*/drivers/gpu/drm/amd" | head -n1)
-    if [[ "$true_amd_dir" != "${build_work}/drivers/gpu/drm/amd" ]]; then
-        mkdir -p "${build_work}/drivers/gpu/drm"
-        mv "$true_amd_dir" "${build_work}/drivers/gpu/drm/"
+    local true_amd_dir
+    true_amd_dir=$(find "${build_work}" -type d -iname "amd" | grep "drivers/gpu/drm/amd$" | head -n1)
+
+    if [[ -z "${true_amd_dir}" ]]; then
+        true_amd_dir=$(find "${build_work}" -type d -name "amd" | head -n1)
     fi
+
+    mkdir -p "${build_work}/drivers/gpu/drm"
+    mv "${true_amd_dir}" "${build_work}/drivers/gpu/drm/"
 
     step "Injecting device level patches..."
     patch -p1 -d "${build_work}" < "${PATCH_FILE}" >> "${LOG_FILE}" 2>&1
 
-    # Ensure baseline profile configs exist before checking stabilization parameters
     if [[ ! -f "${MODPROBE_CONF}" ]]; then
         echo "options amdgpu bc250_cc_write_mode=3" > "${MODPROBE_CONF}"
     fi
@@ -385,6 +382,7 @@ build_and_install() {
     local amd_base="${build_work}/drivers/gpu/drm/amd"
     local temp_mk="${build_work}/Makefile.tmp"
 
+    # SAFETY: Absolute path definitions for out-of-tree tracing constraints
     {
         echo "subdir-ccflags-y += -I${amd_base}/amdgpu"
         echo "subdir-ccflags-y += -I${amd_base}/amdgpu/display"
@@ -394,13 +392,52 @@ build_and_install() {
         cat "${target_makefile}"
     } > "${temp_mk}"
     mv "${temp_mk}" "${target_makefile}"
+
+    # CRITICAL FIX: Explicitly enforce an absolute path configuration mapping into the Trace macro
     sed -i "s|#define TRACE_INCLUDE_PATH .*|#define TRACE_INCLUDE_PATH ${amd_base}/amdgpu|" "${amd_base}/amdgpu/amdgpu_trace.h"
 
     step "Compiling custom driver objects (-j10 compiler mapping)..."
-    make -C "${kernel_build}" -j10 M="${amd_base}/amdgpu" LLVM=1 LLVM_IAS=1 CC=clang modules >> "${LOG_FILE}" 2>&1
+    echo -e "${DIM}-------------------- Compilation Process --------------------${NC}"
+
+    make -C "${kernel_build}" -j10 M="${amd_base}/amdgpu" LLVM=1 LLVM_IAS=1 CC=clang modules >> "${LOG_FILE}" 2>&1 &
+    local compile_pid=$!
+
+    local spin_chars="-\|/"
+    local start_time=$(date +%s)
+
+    # Hide terminal cursor block using native ANSI sequences
+    echo -ne "\033[?25l"
+
+    while kill -0 "$compile_pid" 2>/dev/null; do
+        local current_time=$(date +%s)
+        local elapsed=$((current_time - start_time))
+        local min=$((elapsed / 60))
+        local sec=$((elapsed % 60))
+
+        for (( i=0; i<${#spin_chars}; i++ )); do
+            if kill -0 "$compile_pid" 2>/dev/null; then
+                local log_peek
+                log_peek=$(tail -n1 "${LOG_FILE}" | tr -d '\r\n' | cut -c1-40 | sed 's/%/%%/g' || echo "Processing...")
+
+                printf "\r  [%c] Building AMDGPU module... (%02d:%02d) [ %-40s ]" \
+                    "${spin_chars:$i:1}" "$min" "$sec" "${log_peek}"
+                sleep 0.25
+            fi
+        done
+    done
+
+    # Unhide cursor
+    echo -ne "\033[?25h"
+    printf "\r                                                                                \r"
+    wait "$compile_pid"
+    echo -e "${DIM}--------------------------------------------------------------${NC}"
 
     local built_module="${amd_base}/amdgpu/amdgpu.ko"
     local install_path="/lib/modules/${KERNEL_VERSION}/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst"
+
+    if [[ ! -f "${built_module}" ]]; then
+        error "Module compilation failed. Check /var/lib/bc250-unlock/bc250-unlock.log for details."; exit 1
+    fi
 
     backup_module "current"
     zstd -f --rm "${built_module}" -o "${built_module}.zst" >>"${LOG_FILE}" 2>&1 || true
@@ -421,7 +458,7 @@ build_and_install() {
 }
 
 # ------------------------------------------------------------------------------
-# AUTOMATED PACMAN BACKGROUND DEPLOYMENT RE-PATCH HOOKS
+# AUTOMATED PACMAN BACKGROUND TRIGGER HOOKS
 # ------------------------------------------------------------------------------
 install_hook() {
     header "Installing Universal Pacman Trigger Hooks"
@@ -441,7 +478,6 @@ Exec = /usr/local/bin/bc250-repatch.sh
 NeedsTargets
 EOF
 
-    # Creating the background execution engine script
     cat > /usr/local/bin/bc250-repatch.sh <<'REPATCH'
 #!/bin/bash
 set -euo pipefail
@@ -464,29 +500,31 @@ if [[ ! -d "$KERNEL_BUILD" ]]; then
     exit 0
 fi
 
-# Parsing versions and flavor tags smoothly out of dynamic package targets
+FULL_VER=$(echo "${NEW_KERNEL}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' || echo "${NEW_KERNEL%%-cachyos*}")
 CLEAN_VER=$(echo "${NEW_KERNEL}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
 FLAVOR_SUFFIX=$(echo "${NEW_KERNEL}" | grep -oP 'cachyos.*' || echo "cachyos")
 
 BUILD_WORK="${BASE_DIR}/build_hook"
 rm -rf "${BUILD_WORK}"; mkdir -p "${BUILD_WORK}"
 
-TAR_URL="https://github.com/CachyOS/linux/releases/download/${FLAVOR_SUFFIX}-${CLEAN_VER}/${FLAVOR_SUFFIX}-${CLEAN_VER}.tar.gz"
+TAR_URL="https://github.com/CachyOS/linux/releases/download/${FLAVOR_SUFFIX}-${FULL_VER}/${FLAVOR_SUFFIX}-${FULL_VER}.tar.gz"
 log "Hook fetch: ${TAR_URL}"
 
 if ! curl -sL "$TAR_URL" -o "${BASE_DIR}/hook_src.tar.gz"; then
-    TAR_URL="https://github.com/CachyOS/linux/releases/download/cachyos-${CLEAN_VER}/linux-${CLEAN_VER}.tar.gz"
+    TAR_URL="https://github.com/CachyOS/linux/releases/download/${FLAVOR_SUFFIX}-${CLEAN_VER}/${FLAVOR_SUFFIX}-${CLEAN_VER}.tar.gz"
     curl -sL "$TAR_URL" -o "${BASE_DIR}/hook_src.tar.gz" || exit 0
 fi
 
 tar -xf "${BASE_DIR}/hook_src.tar.gz" --wildcards --ignore-case -C "${BUILD_WORK}" "*/drivers/gpu/drm/amd/*" 2>/dev/null || true
 rm -f "${BASE_DIR}/hook_src.tar.gz"
 
-TRUE_AMD=$(find "${BUILD_WORK}" -type d -path "*/drivers/gpu/drm/amd" | head -n1)
-if [[ "$TRUE_AMD" != "${BUILD_WORK}/drivers/gpu/drm/amd" ]]; then
-    mkdir -p "${BUILD_WORK}/drivers/gpu/drm"
-    mv "$TRUE_AMD" "${BUILD_WORK}/drivers/gpu/drm/"
+TRUE_AMD=$(find "${BUILD_WORK}" -type d -iname "amd" | grep "drivers/gpu/drm/amd$" | head -n1)
+if [[ -z "${TRUE_AMD}" ]]; then
+    TRUE_AMD=$(find "${BUILD_WORK}" -type d -name "amd" | head -n1)
 fi
+
+mkdir -p "${BUILD_WORK}/drivers/gpu/drm"
+mv "${TRUE_AMD}" "${BUILD_WORK}/drivers/gpu/drm/"
 
 if ! patch -p1 -d "${BUILD_WORK}" < "${PATCH_FILE}" >/dev/null; then
     echo "    ERROR: Patch validation breakages encountered. Disabling modifications to prevent boot hang."
@@ -507,6 +545,7 @@ TMP_MK="${BUILD_WORK}/Makefile.tmp"
     cat "${TARGET_MK}"
 } > "${TMP_MK}"
 mv "${TMP_MK}" "${TARGET_MK}"
+
 sed -i "s|#define TRACE_INCLUDE_PATH .*|#define TRACE_INCLUDE_PATH ${AMD_BASE}/amdgpu|" "${AMD_BASE}/amdgpu/amdgpu_trace.h"
 
 make -C "${KERNEL_BUILD}" -j10 M="${AMD_BASE}/amdgpu" LLVM=1 LLVM_IAS=1 CC=clang modules >> "${LOG_FILE}" 2>&1
@@ -535,7 +574,7 @@ REPATCH
 }
 
 # ------------------------------------------------------------------------------
-# REPORTING TOOL (PERFECT 4-COLUMN SYNCED WITH COORDINATES & LABELS)
+# REPORTING TOOL (4-COLUMN COORDINATE DISPLAY)
 # ------------------------------------------------------------------------------
 do_cu_map() {
     header "CU Map — BC250 Compute Unit Status"
@@ -636,13 +675,13 @@ PYEOF
 # ------------------------------------------------------------------------------
 do_status() {
     header "Patch Status"
-    local kv; kv=$(uname -r)
+    detect_kernel
     echo -e "${BOLD}System:${NC}"
-    echo "  Running kernel : ${kv}"
+    echo "  Running kernel : ${KERNEL_VERSION}"
 
     if [[ -f "$STATE_FILE" ]]; then
         local inst_k; inst_k=$(head -n1 "${STATE_FILE}")
-        if [[ "$inst_k" == "$kv" ]]; then
+        if [[ "$inst_k" == "$KERNEL_VERSION" ]]; then
             echo -e "  Install state  : ${GREEN}Patched for current kernel${NC}"
         else
             echo -e "  Install state  : ${YELLOW}Kernel Mismatch (Installed for: ${inst_k})${NC}"
@@ -669,12 +708,74 @@ do_status() {
     do_cu_map
 }
 
+# ------------------------------------------------------------------------------
+# UNINSTALL / RESTORATION
+# ------------------------------------------------------------------------------
 do_uninstall() {
-    header "Uninstall / Full Removal"
-    echo -e "${YELLOW}Reverting systems to stock states...${NC}"
-    rm -f "${MODPROBE_CONF}" "${HOOK_FILE}" /usr/local/bin/bc250-repatch.sh "${STATE_FILE}"
-    if command -v mkinitcpio >/dev/null 2>&1; then mkinitcpio -P </dev/null >>"${LOG_FILE}" 2>&1 || true; fi
-    success "System completely cleaned. Cold reboot to finish reset."
+    header "Uninstall / Full System Restoration"
+    detect_kernel
+
+    echo -e "${YELLOW}${BOLD}!!! WARNING: This will remove all custom BC250 patches and restore the stock driver !!!${NC}"
+    echo -n "    Are you sure you want to proceed? [y/N]: "
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Uninstall aborted."
+        return 0
+    fi
+
+    step "Removing modprobe, configuration hooks, and automation engines..."
+    rm -f "${MODPROBE_CONF}"
+    rm -f "${HOOK_FILE}"
+    rm -f /usr/local/bin/bc250-repatch.sh
+
+    local backup_path="${ORIGINAL_BACKUP_DIR}/amdgpu.ko.zst"
+    local backup_raw="${ORIGINAL_BACKUP_DIR}/amdgpu.ko"
+    local target_meta="${ORIGINAL_BACKUP_DIR}/module-path.txt"
+
+    if [[ -f "$target_meta" ]]; then
+        local original_destination; original_destination=$(cat "$target_meta" 2>/dev/null || echo "")
+
+        if [[ -n "$original_destination" ]]; then
+            step "Restoring stock factory AMDGPU driver module..."
+            mkdir -p "$(dirname "$original_destination")"
+
+            if [[ -f "$backup_path" ]]; then
+                cp -f "$backup_path" "$original_destination"
+                success "Restored stock driver from compressed archive backup."
+            elif [[ -f "$backup_raw" ]]; then
+                if [[ "$original_destination" == *.zst ]]; then
+                    zstd -f -q --rm "$backup_raw" -o "$original_destination"
+                else
+                    cp -f "$backup_raw" "$original_destination"
+                fi
+                success "Restored stock driver from uncompressed backup."
+            else
+                warn "Driver backup archives missing. Reinstalling core kernel package modules..."
+                pacman -S --noconfirm "${KERNEL_PKG}" >>"${LOG_FILE}" 2>&1 || true
+            fi
+        fi
+    else
+        # SAFETY: If running uninstall multiple times without any records, pacman sync handles it cleanly
+        warn "No module backup metadata found. Overwriting changes via core package validation..."
+        pacman -S --noconfirm "${KERNEL_PKG}" >>"${LOG_FILE}" 2>&1 || true
+    fi
+
+    step "Clearing application execution states..."
+    rm -f "${STATE_FILE}"
+    rm -f "${BASE_DIR}/last_snapshot_num"
+    rm -rf "${BASE_DIR}/build" "${BASE_DIR}/build_hook"
+
+    step "Re-indexing kernel dependency pointers..."
+    depmod -a "${KERNEL_VERSION}" >>"${LOG_FILE}" 2>&1 || true
+
+    step "Regenerating system-wide initramfs boot images..."
+    if command -v mkinitcpio >/dev/null 2>&1; then
+        mkinitcpio -P </dev/null >>"${LOG_FILE}" 2>&1 || true
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}Uninstall complete! Everything has been safely reverted.${NC}"
+    echo -e "${YELLOW}Please complete a cold reboot to return the GPU to factory stock settings.${NC}"
 }
 
 do_install() {
@@ -702,9 +803,9 @@ main_menu() {
         echo "  ║       ASRock BC250 AMDGPU Universal Unlock Tool          ║"
         echo -e "  ╚═══════════════════════════════════════════════════════════╝${NC}"
         echo -e "  ${DIM}Script version: ${SCRIPT_VERSION}${NC}\n"
-        echo -e "  ${BOLD}1)${NC} Run Full Driver Patch Installation"
-        echo -e "  ${BOLD}2)${NC} Uninstall"
-        echo -e "  ${BOLD}3)${NC} Manage Stabilization Exclusion Mask (disable_cu)"
+        echo -e "  ${BOLD}1)${NC} Run Full Driver Patch / Installation"
+        echo -e "  ${BOLD}2)${NC} Uninstall Unlock and return to stock"
+        echo -e "  ${BOLD}3)${NC} Manage CU disabling for bad CUs"
         echo -e "  ${BOLD}4)${NC} Inspect Live CU Maps & Patch Status"
         echo -e "  ${BOLD}5)${NC} Exit"
         echo ""
