@@ -22,7 +22,7 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 # CONSTANTS & PATHS
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.4.0"
 SCRIPT_NAME="bc250-unlock"
 BASE_DIR="/var/lib/bc250-unlock"
 BACKUP_DIR="${BASE_DIR}/backups"
@@ -343,18 +343,29 @@ build_and_install() {
     step "Downloading matching kernel architecture packages..."
     local full_ver
     full_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' || echo "${KERNEL_VERSION%%-cachyos*}")
-    local flavor_suffix=$(echo "${KERNEL_VERSION}" | grep -oP 'cachyos.*' || echo "cachyos")
+    local clean_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
+
+    local flavor_suffix
+    if [[ "${KERNEL_VERSION}" == *"cachyos"* ]]; then
+        flavor_suffix=$(echo "${KERNEL_VERSION}" | grep -oP 'cachyos[a-zA-Z0-9_-]*' | head -n1 || echo "cachyos")
+    else
+        flavor_suffix="cachyos"
+    fi
 
     local tar_url="https://github.com/CachyOS/linux/releases/download/${flavor_suffix}-${full_ver}/${flavor_suffix}-${full_ver}.tar.gz"
     log "Fetching primary package release path: ${tar_url}"
 
     if ! curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz"; then
-        local clean_ver=$(echo "${KERNEL_VERSION}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
         tar_url="https://github.com/CachyOS/linux/releases/download/${flavor_suffix}-${clean_ver}/${flavor_suffix}-${clean_ver}.tar.gz"
         log "Routing to alternate branch indices: ${tar_url}"
-        curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz" || {
-            error "Could not successfully locate valid upstream reference packs."; exit 1
-        }
+        if ! curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz"; then
+            # Universal fallback path for granular handheld variations
+            tar_url="https://github.com/CachyOS/linux/releases/download/cachyos-${clean_ver}/cachyos-${clean_ver}.tar.gz"
+            log "Routing to last resort common architecture block: ${tar_url}"
+            curl -sL "$tar_url" -o "${BASE_DIR}/kernel_src.tar.gz" || {
+                error "Could not successfully locate valid upstream reference packs."; exit 1
+            }
+        fi
     fi
 
     step "Extracting graphics engine modules..."
@@ -500,36 +511,64 @@ if [[ ! -d "$KERNEL_BUILD" ]]; then
     exit 0
 fi
 
-FULL_VER=$(echo "${NEW_KERNEL}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' || echo "${NEW_KERNEL%%-cachyos*}")
 CLEAN_VER=$(echo "${NEW_KERNEL}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+')
-FLAVOR_SUFFIX=$(echo "${NEW_KERNEL}" | grep -oP 'cachyos.*' || echo "cachyos")
+FULL_VER=$(echo "${NEW_KERNEL}" | grep -oP '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' || echo "${NEW_KERNEL%%-cachyos*}")
 
 BUILD_WORK="${BASE_DIR}/build_hook"
-rm -rf "${BUILD_WORK}"; mkdir -p "${BUILD_WORK}"
+rm -rf "${BUILD_WORK}"
+mkdir -p "${BUILD_WORK}/drivers/gpu/drm/amd"
 
-TAR_URL="https://github.com/CachyOS/linux/releases/download/${FLAVOR_SUFFIX}-${FULL_VER}/${FLAVOR_SUFFIX}-${FULL_VER}.tar.gz"
-log "Hook fetch: ${TAR_URL}"
+TAR_URL="https://github.com/CachyOS/linux/releases/download/cachyos-${FULL_VER}/cachyos-${FULL_VER}.tar.gz"
+log "Hook fetch primary route: ${TAR_URL}"
 
-if ! curl -sL "$TAR_URL" -o "${BASE_DIR}/hook_src.tar.gz"; then
-    TAR_URL="https://github.com/CachyOS/linux/releases/download/${FLAVOR_SUFFIX}-${CLEAN_VER}/${FLAVOR_SUFFIX}-${CLEAN_VER}.tar.gz"
-    curl -sL "$TAR_URL" -o "${BASE_DIR}/hook_src.tar.gz" || exit 0
+# Primary Attempt: Try downloading the monolithic source tarball asset
+if curl -sLf "$TAR_URL" -o "${BASE_DIR}/hook_src.tar.gz"; then
+    tar -xf "${BASE_DIR}/hook_src.tar.gz" --strip-components=4 --wildcards --ignore-case -C "${BUILD_WORK}/drivers/gpu/drm/amd" "*/drivers/gpu/drm/amd/*" 2>/dev/null || true
+    rm -f "${BASE_DIR}/hook_src.tar.gz"
 fi
 
-tar -xf "${BASE_DIR}/hook_src.tar.gz" --wildcards --ignore-case -C "${BUILD_WORK}" "*/drivers/gpu/drm/amd/*" 2>/dev/null || true
-rm -f "${BASE_DIR}/hook_src.tar.gz"
+# Verification & Fallback: If tarball asset 404ed or extracted incorrectly, pull via Git
+if [[ ! -f "${BUILD_WORK}/drivers/gpu/drm/amd/amdgpu/Makefile" ]]; then
+    log "Upstream asset asset unresolvable. Launching shallow Git sync..."
+    echo "    -> Pulling source tree directly from CachyOS kernel repository..."
 
-TRUE_AMD=$(find "${BUILD_WORK}" -type d -iname "amd" | grep "drivers/gpu/drm/amd$" | head -n1)
-if [[ -z "${TRUE_AMD}" ]]; then
-    TRUE_AMD=$(find "${BUILD_WORK}" -type d -name "amd" | head -n1)
+    GIT_WORK="${BASE_DIR}/cachyos_git"
+    rm -rf "${GIT_WORK}"
+
+    if git clone --depth 1 --branch "v${CLEAN_VER}-cachy" https://github.com/CachyOS/linux.git "${GIT_WORK}" >> "${LOG_FILE}" 2>&1; then
+        cp -rf "${GIT_WORK}/drivers/gpu/drm/amd/." "${BUILD_WORK}/drivers/gpu/drm/amd/"
+        rm -rf "${GIT_WORK}"
+    else
+        log "Tag v${CLEAN_VER}-cachy not found. Falling back to master branch tracking..."
+        git clone --depth 1 https://github.com/CachyOS/linux.git "${GIT_WORK}" >> "${LOG_FILE}" 2>&1
+        cp -rf "${GIT_WORK}/drivers/gpu/drm/amd/." "${BUILD_WORK}/drivers/gpu/drm/amd/"
+        rm -rf "${GIT_WORK}"
+    fi
 fi
 
-mkdir -p "${BUILD_WORK}/drivers/gpu/drm"
-mv "${TRUE_AMD}" "${BUILD_WORK}/drivers/gpu/drm/"
+# Hard Boundary: Crash explicitly if the Makefile isn't in place to prevent cascade errors
+if [[ ! -f "${BUILD_WORK}/drivers/gpu/drm/amd/amdgpu/Makefile" ]]; then
+    echo "    ERROR: Subsystem driver source tree could not be resolved."
+    exit 1
+fi
 
-if ! patch -p1 -d "${BUILD_WORK}" < "${PATCH_FILE}" >/dev/null; then
-    echo "    ERROR: Patch validation breakages encountered. Disabling modifications to prevent boot hang."
-    echo "options amdgpu bc250_cc_write_mode=0" > "${MODPROBE_CONF}"
-    exit 0
+# Optimization Logic: Attempt unified patch execution, fallback to inline regex swaps
+if patch -p1 -d "${BUILD_WORK}" < "${PATCH_FILE}" >/dev/null 2>&1; then
+    log "Standard diff patch applied cleanly."
+else
+    log "Patch conflict detected in local driver source layout. Initiating inline substitution fallback..."
+
+    DRV_SRC="${BUILD_WORK}/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c"
+    KMS_SRC="${BUILD_WORK}/drivers/gpu/drm/amd/amdgpu/amdgpu_kms.c"
+
+    if [[ -f "$DRV_SRC" ]]; then
+        sed -i 's/int amdgpu_bc250_cc_write_mode = .*/int amdgpu_bc250_cc_write_mode = 3;/g' "$DRV_SRC" || true
+    fi
+
+    if [[ -f "$KMS_SRC" ]]; then
+        sed -i 's/adev->harvest_bitmask = .*/adev->harvest_bitmask = 0;/g' "$KMS_SRC" || true
+    fi
+    log "Inline substitutions complete. Resuming build sequence."
 fi
 
 AMD_BASE="${BUILD_WORK}/drivers/gpu/drm/amd"
@@ -548,7 +587,8 @@ mv "${TMP_MK}" "${TARGET_MK}"
 
 sed -i "s|#define TRACE_INCLUDE_PATH .*|#define TRACE_INCLUDE_PATH ${AMD_BASE}/amdgpu|" "${AMD_BASE}/amdgpu/amdgpu_trace.h"
 
-make -C "${KERNEL_BUILD}" -j10 M="${AMD_BASE}/amdgpu" LLVM=1 LLVM_IAS=1 CC=clang modules >> "${LOG_FILE}" 2>&1
+echo "    -> Compiling custom driver extensions (this may take a moment)..."
+make -C "${KERNEL_BUILD}" -j10 M="${AMD_BASE}/amdgpu" modules >> "${LOG_FILE}" 2>&1
 
 BUILT="${AMD_BASE}/amdgpu/amdgpu.ko"
 INSTALL_PATH="/lib/modules/${NEW_KERNEL}/kernel/drivers/gpu/drm/amd/amdgpu/amdgpu.ko.zst"
@@ -561,18 +601,45 @@ else
 fi
 
 depmod -a "${NEW_KERNEL}"
-if command -v mkinitcpio >/dev/null 2>&1; then
+
+# Universal Ramdisk Engine Optimization Block
+echo "    -> Updating system ramdisk modules layout..."
+if command -v mkinitcpio >/dev/null 2>&1 && ls /etc/mkinitcpio.d/*.preset >/dev/null 2>&1; then
     mkinitcpio -P >> "${LOG_FILE}" 2>&1 || true
+else
+    # Dynamic target discovery loop for systems utilizing systemd-boot/Limine layouts
+    # Finds the matching active flavor target folder inside /boot dynamically
+    FLAVOR_DIR=$(find /boot -type d -name "*${NEW_KERNEL#linux-}*" -o -name "*${NEW_KERNEL}*" 2>/dev/null | head -n1)
+
+    # Fallback to standard machine-id tracking if flavor match is completely blank
+    if [[ -z "${FLAVOR_DIR}" ]]; then
+        MACHINE_ID=$(cat /etc/machine-id 2>/dev/null || echo "")
+        if [[ -n "${MACHINE_ID}" ]]; then
+            FLAVOR_DIR=$(find /boot -type d -name "${MACHINE_ID}" 2>/dev/null | head -n1)
+        fi
+    fi
+
+    if [[ -n "${FLAVOR_DIR}" && -f "${FLAVOR_DIR}/initramfs-${NEW_KERNEL}" ]]; then
+        mkinitcpio -k "${NEW_KERNEL}" -g "${FLAVOR_DIR}/initramfs-${NEW_KERNEL}" >> "${LOG_FILE}" 2>&1 || true
+    elif [[ -n "${FLAVOR_DIR}" ]]; then
+        # Handle cases where the initramfs naming schema strips prefix tags
+        TARGET_IMG=$(find "${FLAVOR_DIR}" -type f -name "initramfs*" | head -n1)
+        if [[ -n "${TARGET_IMG}" ]]; then
+            mkinitcpio -k "${NEW_KERNEL}" -g "${TARGET_IMG}" >> "${LOG_FILE}" 2>&1 || true
+        fi
+    else
+        log "Universal fallback route triggered: Generating global image backup."
+        mkinitcpio -k "${NEW_KERNEL}" -g "/boot/initramfs-${NEW_KERNEL}.img" >> "${LOG_FILE}" 2>&1 || true
+    fi
 fi
 
 echo "${NEW_KERNEL}" > "${STATE_FILE}"
-echo "    Compilation pipeline finalized."
+echo "    Compilation pipeline finalized successfully."
 REPATCH
 
     chmod +x /usr/local/bin/bc250-repatch.sh
     success "Flavor-Aware Hook structures deployed."
 }
-
 # ------------------------------------------------------------------------------
 # REPORTING TOOL (4-COLUMN COORDINATE DISPLAY)
 # ------------------------------------------------------------------------------
@@ -804,8 +871,8 @@ main_menu() {
         echo -e "  ╚═══════════════════════════════════════════════════════════╝${NC}"
         echo -e "  ${DIM}Script version: ${SCRIPT_VERSION}${NC}\n"
         echo -e "  ${BOLD}1)${NC} Run Full Driver Patch / Installation"
-        echo -e "  ${BOLD}2)${NC} Uninstall Unlock and return to stock"
-        echo -e "  ${BOLD}3)${NC} Manage CU disabling for bad CUs"
+        echo -e "  ${BOLD}2)${NC} Uninstall Utility Framework"
+        echo -e "  ${BOLD}3)${NC} Manage Stabilization Exclusion Mask (disable_cu)"
         echo -e "  ${BOLD}4)${NC} Inspect Live CU Maps & Patch Status"
         echo -e "  ${BOLD}5)${NC} Exit"
         echo ""
