@@ -25,18 +25,22 @@ curl -sSLO https://raw.githubusercontent.com/redbeard1083/bc250-toolkit/main/bc2
 
 
 
-## The BC250-unlock script will let you unlock up to 40CUs, mind you you can run into stability issues if there are some CUs that are actually bad. 
+## The BC250-unlock script will let you unlock up to 40CUs, 
+
+> Mind you you can run into stability issues if there are some CUs that are actually bad. 
 
 What this script does is downloads your kernel source, rebuilds the amdgpu driver with the patch, and adds a hook to pacman to trigger the rebuild anytime the kernal is updated.
 
 To use:
 
-> Run the below command in your terminal use option 4 to see what your CU map looks like and take a screen shot of it because you may need to reference this later incase you have > to disable some bad CUs. then run option 1 and if all goes well it will tell you to reboot. After rebooting rerun the script again and run option 4 to see if all 40 CUs are now > unlocked. If you run into stability issues you can use option 3 to disable pairs of CUs until you figure out which one is bad. 
-
+> Run the below command in your terminal use option 4 to see what your CU map looks like and take a screen shot of it because you may need to reference this later incase you have to disable some bad CUs. then run option 1 and if all goes well it will tell you to reboot. After rebooting rerun the script again and run option 4 to see if all 40 CUs are now unlocked. If you run into stability issues you can use option 3 to disable pairs of CUs until you figure out which one is bad. 
+>
 > Also this script will do an automatic snapshot so if things go bad you can just select the last snapshot from the Limine boot menu.
-
+>
 > If you want to uninstall just select option 2 and it will remove everything and just reboot.
-
+>
+> Make sure you adjust your gpu frequencies and voltages after enabling the CUs and do some stability and thermal testing.
+>
 > In desktop mode run the below in the terminal(Konsole) for the CU unlock script or you can download above bc250-unlock.sh:
 
 <pre>
