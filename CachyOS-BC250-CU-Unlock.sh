@@ -53,12 +53,13 @@ unlock_manual() {
     umr -w *.gfx1013.mmSPI_PG_ENABLE_STATIC_WGP_MASK 0x1f -b 0 1 0xffffffff
     umr -w *.gfx1013.mmSPI_PG_ENABLE_STATIC_WGP_MASK 0x1f -b 1 0 0xffffffff
     umr -w *.gfx1013.mmSPI_PG_ENABLE_STATIC_WGP_MASK 0x1f -b 1 1 0xffffffff
-    echo "Done. Test your GPU now. A reboot will reset these settings. Test via Superposition or Furmark"
+    echo "Done. Test your GPU now. A reboot will reset these settings."
 }
 
 create_service() {
     cat << 'EOF' > "$WORKER_SCRIPT"
 #!/bin/bash
+exec > >(logger -t bc250-unlock) 2>&1
 umr -w *.gfx1013.mmRLC_PG_ALWAYS_ON_WGP_MASK 0x1f
 umr -w *.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG 0x0
 umr -w *.gfx1013.mmCC_GC_SHADER_ARRAY_CONFIG 0x0 -b 1 0 0xffffffff
@@ -92,9 +93,15 @@ show_disclaimer
 echo "1) Test Unlock (Temporary)"
 echo "2) Install Permanent Service"
 echo "3) Uninstall"
+echo "4) Status & Logs"
 read -p "Option: " opt
 case $opt in
     1) install_umr; unlock_manual ;;
     2) install_umr; create_service; systemctl enable --now $SERVICE_NAME; echo "Permanent service enabled." ;;
     3) systemctl disable --now $SERVICE_NAME; rm -f "$SERVICE_PATH" "$WORKER_SCRIPT" "$UDEV_RULE"; echo "Uninstalled." ;;
+    4)
+        if [ -f "$SERVICE_PATH" ]; then
+            systemctl status $SERVICE_NAME;
+            journalctl -t bc250-unlock -n 20;
+        else echo "Service not installed."; fi ;;
 esac
