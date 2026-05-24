@@ -35,10 +35,21 @@ SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 WORKER_SCRIPT="/usr/local/bin/bc250-apply-unlock.sh"
 UDEV_RULE="/etc/udev/rules.d/99-systemd-dri-devices.rules"
 
-# Logic Functions
 install_umr() {
-    local AUR=$(command -v paru || command -v yay)
-    if ! pacman -Qi umr &> /dev/null; then $AUR -S --needed --noconfirm umr; fi
+    # Check if we are running as root, and if so, capture the original user
+    local USER_NAME=${SUDO_USER:-$USER}
+
+    # Check if paru is installed
+    if ! command -v paru &> /dev/null; then
+        echo "Error: paru not found. Please install it as your regular user."
+        exit 1
+    fi
+
+    # Install umr using the regular user context via sudo -u
+    if ! pacman -Qi umr &> /dev/null; then
+        echo ":: Installing umr via paru as user: $USER_NAME"
+        sudo -u "$USER_NAME" paru -S --needed --noconfirm umr
+    fi
 }
 
 unlock_manual() {
@@ -97,7 +108,7 @@ echo "4) Status & Logs"
 read -p "Option: " opt
 case $opt in
     1) install_umr; unlock_manual ;;
-    2) install_umr; create_service; systemctl enable --now $SERVICE_NAME; echo "Permanent service enabled." ;;
+    2) install_umr; create_service; systemctl enable --now --no-block $SERVICE_NAME; echo "Permanent service enabled." ;;
     3) systemctl disable --now $SERVICE_NAME; rm -f "$SERVICE_PATH" "$WORKER_SCRIPT" "$UDEV_RULE"; echo "Uninstalled." ;;
     4)
         if [ -f "$SERVICE_PATH" ]; then
